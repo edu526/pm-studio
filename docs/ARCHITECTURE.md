@@ -418,9 +418,13 @@ status surfaces rather than walking the chain. ADO needs two calls by design: WI
 (single quotes doubled, so a project named `Bob's Team` can't break the literal), then
 hydration in batches of 200, a server limit rather than a preference.
 
-**Sync trigger.** One daemon thread started from `lifespan` *only when a tracker is
-configured*, waking each minute and pulling whichever trackers are due on their own
-`sync_interval_minutes`; plus `POST /trackers/sync`. After a catalog pull, linked tickets
+**Sync trigger.** Manual only: `POST /trackers/sync` (**Sync now** in the board header).
+There is no background poller - an unattended pass rewriting the board on a timer is how
+a second or stale instance double-imports tickets, and `sync_interval_minutes` is now a
+dead config key. One pass at a time, process-wide: `server._sync_run_lock` refuses an
+overlapping run and `TrackerStore.syncing()` is held across *every* pass (fetch, import,
+assignment, removal, mirrors), not just the fetch. Across processes, `workspace_lock`
+keeps there from being a second server at all. After a catalog pull, linked tickets
 outside the configured `projects` are fetched individually, so a one-off dependency on
 another team's board resolves instead of rendering unresolved forever.
 

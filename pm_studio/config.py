@@ -63,9 +63,11 @@ MODES = (MODE_PERSONAL, MODE_ENTERPRISE)
 
 DEFAULT_SMTP_PORT = 587
 
-# How often a configured tracker is re-pulled in the background. Minutes, not seconds:
-# ticket types change rarely, and a tight loop against someone's Jira is how a deployment
-# earns a rate limit. A stakeholder who needs it sooner has "Sync now" on the board.
+# DEPRECATED, kept only so existing config files keep loading: nothing schedules a
+# tracker pull any more. Syncs are started by hand ("Sync now" on the board, or POST
+# /trackers/sync) - an unattended pass that rewrites the board while nobody is watching
+# is how a second or stale instance double-imports tickets, and is not worth the few
+# minutes of freshness it buys.
 DEFAULT_SYNC_INTERVAL_MINUTES = 15.0
 MIN_SYNC_INTERVAL_MINUTES = 1.0
 
@@ -201,8 +203,9 @@ class TrackerConfig:
     token: str = ""
     # ADO only: the dev.azure.com organization name.
     organization: str = ""
-    # How often the background sync re-pulls this tracker. Per tracker because a busy
-    # Jira and a quiet ADO project don't deserve the same polling rate.
+    # DEPRECATED and unread: there is no background sync (see
+    # DEFAULT_SYNC_INTERVAL_MINUTES). Still parsed so a config that declares it loads,
+    # and reported once at startup so it can be deleted.
     sync_interval_minutes: float = DEFAULT_SYNC_INTERVAL_MINUTES
     # IMPORT: which ticket types become changes, and how their components route onto
     # products. Both empty = the historical behavior byte for byte (catalog sync and
@@ -2077,6 +2080,13 @@ def _parse_trackers(
         # Floored rather than rejected: a config asking for every 5 seconds is a mistake,
         # and hammering someone's tracker is worse than quietly slowing down.
         interval = max(MIN_SYNC_INTERVAL_MINUTES, interval)
+        if entry.get("sync_interval_minutes") is not None:
+            print(
+                f"[config] tracker {tracker_id!r}: sync_interval_minutes is ignored - "
+                f"tracker syncs are manual (\"Sync now\" / POST /trackers/sync). "
+                f"Remove the line.",
+                file=sys.stderr,
+            )
 
         import_types_raw = entry.get("import_types", [])
         if isinstance(import_types_raw, str) or not isinstance(import_types_raw, (list, tuple)):

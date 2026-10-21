@@ -775,10 +775,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Portfolio edits ride the roadmap socket: anything watching the board already
     # cares when a project is re-parented or an initiative closes.
     portfolio_store.subscribe(_on_roadmap_update)
-    # Only started when a tracker is actually configured, so an unconfigured deployment
-    # runs no extra thread at all.
-    if tracker_store.is_configured:
-        threading.Thread(target=_tracker_sync_loop, daemon=True).start()
+    # Tracker syncs are MANUAL (the board's "Sync now" button / POST /trackers/sync).
+    # There is no background poller: an unattended pass that rewrites the board on its
+    # own schedule is how a stale or second instance quietly double-imports tickets, and
+    # a pull from Jira/ADO is something to ask for when you want it, not something that
+    # happens to the board while nobody is looking.
     # The intelligence ledger refreshes on its own cadence ([signals]
     # auto_refresh_minutes); 0 leaves it to the page's Refresh button.
     if CONFIG.signals.auto_refresh_minutes > 0:
@@ -2404,10 +2405,40 @@ def _described_trackers() -> dict:
     }
 
 
+# One tracker pass at a time, process-wide. TrackerStore.is_syncing used to be the only
+# guard and it covers the FETCH alone - it is already False while the import passes
+# below are still creating changes, so a second pass starting in that window computed
+# its "already linked" set from a half-finished board and imported the same tickets
+# again. That is the in-process half of the duplicate-change bug; the cross-process half
+# is workspace_lock's.
+_sync_run_lock = threading.Lock()
+
+
 def _run_tracker_sync(tracker_id: str | None) -> None:
     """One sync pass, off the event loop. Never raises - TrackerStore.sync records each
     tracker's failure in its own status entry, and this wrapper is the last backstop so a
     bug here cannot kill the thread silently.
+
+    Skipped outright if a pass is already running: two passes over one board duplicate
+    work at best and double-import at worst, and the caller asked for a fresh catalog,
+    which the pass already in flight is busy producing.
+    """
+    if not _sync_run_lock.acquire(blocking=False):
+        print("[trackers] sync already running - this request was skipped")
+        return
+    try:
+        # Held across every pass below, not just the fetch, so the board's "Syncing..."
+        # state and the POST /trackers/sync guard both stay true until the import,
+        # assignment, removal and mirror passes have finished.
+        with tracker_store.syncing():
+            _tracker_sync_passes(tracker_id)
+    finally:
+        _sync_run_lock.release()
+    _on_roadmap_update({"type": "trackers_synced", "trackers": _described_trackers()})
+
+
+def _tracker_sync_passes(tracker_id: str | None) -> None:
+    """The passes themselves, run under _run_tracker_sync's guard.
 
     Pass order matters. The people directory is folded first, so a change the import
     creates can name whoever the ticket is assigned to straight away. Epics become
@@ -2444,7 +2475,6 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
         _report_stale_excluded_imports()
     except Exception as exc:  # noqa: BLE001
         print(f"[trackers] sync failed: {exc}")
-    _on_roadmap_update({"type": "trackers_synced", "trackers": _described_trackers()})
 
 
 def _reconcile_people() -> None:
@@ -3531,18 +3561,6 @@ def _import_routed_tickets() -> None:
         }
         if imported:
             print(f"[trackers] {config.id}: imported {imported} change(s)")
-
-
-def _tracker_sync_loop() -> None:
-    """Background poller: wakes once a minute and syncs whichever trackers are due on
-    their own interval (see TrackerConfig.sync_interval_minutes)."""
-    while True:
-        try:
-            for tracker_id in tracker_store.due_tracker_ids():
-                _run_tracker_sync(tracker_id)
-        except Exception as exc:  # noqa: BLE001 - the loop must outlive any single error
-            print(f"[trackers] sync loop error: {exc}")
-        time.sleep(60)
 
 
 @app.get("/roadmap/data")

@@ -155,7 +155,7 @@ base_url = "https://acme.atlassian.net"
 projects = ["PROJ", "PLAT"]
 email = "pm@acme.com"            # Jira Cloud authenticates as email + API token
 token_env = "PM_STUDIO_JIRA_TOKEN"
-sync_interval_minutes = 15       # default 15, floor 1
+# sync_interval_minutes is DEPRECATED and ignored - syncs are manual ("Sync now").
 
 # Optional: lets PM Studio CREATE tickets in this tracker (see "Pushing tickets").
 # Omit and the connection stays read-only, exactly as it was before push existed.
@@ -1054,8 +1054,9 @@ curl -s -X PATCH http://127.0.0.1:8000/roadmap/<product>/items/<item_id> -H "Con
 **404** rather than stored, so a typo can't sit on a card forever looking like a sync
 outage.
 
-**Syncing.** Each tracker is pulled on its own `sync_interval_minutes` by one
-background thread, plus **Sync now** in the board header. Jira uses
+**Syncing.** Pulled when you ask for it - **Sync now** in the board header, or
+`POST /trackers/sync`. Nothing syncs on a timer, and a pass already running makes a
+second request a no-op. Jira uses
 `/rest/api/3/search/jql` and falls back to the older offset-paginated
 `/rest/api/{3,2}/search` for Server/DC; ADO uses WIQL then batched work-item hydration.
 Linked tickets that fall outside `projects` are fetched individually, so a one-off

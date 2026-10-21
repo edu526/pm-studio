@@ -43,8 +43,19 @@ def _open_browser_when_ready(server) -> None:
 def _serve() -> None:
     import uvicorn
 
+    from .workspace_lock import WorkspaceBusy, WorkspaceLock
+
     cfg = config.CONFIG
     print(f"PM Studio v{__version__} - project '{cfg.project_name}' at {cfg.repo_root} (starting...)")
+    # Before the server module is imported (and with it the stores that would start
+    # reading the workspace): one writer per workspace, or this process does not run.
+    # See workspace_lock - two servers against one workspace silently overwrite each
+    # other's edits and double-import tracker tickets.
+    try:
+        lock = WorkspaceLock().acquire()
+    except WorkspaceBusy as busy:
+        print(f"\n{busy}\n", file=sys.stderr)
+        raise SystemExit(1)
     # timeout_graceful_shutdown: without it, Ctrl+C waits on every open browser tab's
     # websockets and every in-flight request indefinitely ("Shutting down" forever).
     server = uvicorn.Server(uvicorn.Config(
@@ -58,6 +69,10 @@ def _serve() -> None:
         # Ctrl+C after shutdown already completed: uvicorn.run() swallows this too, and a
         # traceback here would read as a crash when the server stopped cleanly.
         pass
+    finally:
+        # Released however we leave - clean stop, Ctrl+C or crash. A lock left behind by
+        # a kill -9 is taken over by the next start rather than needing cleanup.
+        lock.release()
 
 
 def _apply_overrides(host: str | None, port: int | None) -> None:

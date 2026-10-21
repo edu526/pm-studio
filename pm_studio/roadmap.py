@@ -15,6 +15,7 @@ from .config import CONFIG, CONFIG_FILE_NAME, LOCAL_DIR_NAME, ProductMeta, Syste
 # that definition, so it lives in one place and the store applies it itself rather than
 # trusting callers to normalise first. (trackers.py imports only config - no cycle.)
 from .trackers import normalize_key
+from .workspace_lock import warn_if_held
 
 ROADMAP_DIR = CONFIG.workspace_dir / "roadmap"
 
@@ -494,6 +495,9 @@ class RoadmapStore:
         self._lock = threading.Lock()
         self._items: dict[str, RoadmapItem] = {}
         self._subscribers: list[Callable[[dict], None]] = []
+        # Says so out loud when this process is NOT the one holding the workspace: the
+        # whole-file saves below would be clobbered by the running server's own copy.
+        warn_if_held()
         self._load()
 
     def _path(self, product: str) -> Path:

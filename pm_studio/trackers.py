@@ -41,8 +41,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 from .config import CONFIG, TrackerConfig
 
@@ -1124,7 +1126,11 @@ class TrackerStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._state = _State()
-        self._syncing = False
+        # Depth, not a bool: the server holds this open across the whole sync (fetch +
+        # its own import/mirror passes) and sync() below marks its own fetch inside
+        # that, so the inner window must not clear the outer one. See
+        # server._run_tracker_sync.
+        self._sync_depth = 0
         self._load()
 
     # ---- persistence ----
@@ -1180,7 +1186,25 @@ class TrackerStore:
 
     @property
     def is_syncing(self) -> bool:
-        return self._syncing
+        return self._sync_depth > 0
+
+    @contextmanager
+    def syncing(self) -> Iterator[None]:
+        """Marks a sync in flight for as long as the caller holds it.
+
+        What `is_syncing` means to every reader - the board's "Syncing..." button, the
+        POST /trackers/sync guard - is "a pass is running", not "a fetch is running".
+        Those were the same thing until the import passes turned out to be the half that
+        duplicates work when two passes overlap, so the server now holds this around all
+        of them.
+        """
+        with self._lock:
+            self._sync_depth += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._sync_depth -= 1
 
     def lookup(self, tracker_id: str | None, key: str | None) -> Ticket | None:
         if not tracker_id or not key:
@@ -1328,7 +1352,7 @@ class TrackerStore:
             )
         return {
             "configured": bool(CONFIG.trackers),
-            "syncing": self._syncing,
+            "syncing": self.is_syncing,
             "last_sync_at": last_sync_at,
             "trackers": trackers,
             "types": list(CANONICAL_TYPES),
@@ -1442,23 +1466,6 @@ class TrackerStore:
             self._save_locked()
         return ticket, parent_set
 
-    def due_tracker_ids(self, now: float | None = None) -> list[str]:
-        """Which trackers the background loop should pull right now.
-
-        A tracker is due when it has never synced or its last attempt (success OR failure -
-        a failing tracker must keep retrying) is older than its own interval.
-        """
-        moment = now if now is not None else time.time()
-        with self._lock:
-            statuses = dict(self._state.statuses)
-        due = []
-        for config in CONFIG.trackers:
-            status = statuses.get(config.id)
-            last = (status.finished_at or status.started_at) if status else None
-            if last is None or moment - last >= config.sync_interval_minutes * 60:
-                due.append(config.id)
-        return due
-
     def refresh_missing(self, refs: list[tuple[str, str]]) -> int:
         """Fetches any linked ticket the catalog does not hold, one call each.
 
@@ -1490,15 +1497,12 @@ class TrackerStore:
         targets = [
             t for t in CONFIG.trackers if tracker_id is None or t.id == tracker_id
         ]
-        self._syncing = True
-        try:
+        with self.syncing():
             for config in targets:
                 self._sync_one(config)
             with self._lock:
                 self._state.last_sync_at = time.time()
                 self._save_locked()
-        finally:
-            self._syncing = False
         return self.describe()
 
     def _sync_one(self, config: TrackerConfig) -> None:

@@ -648,24 +648,27 @@ class TrackerStoreSyncTest(_StoreCase):
         with _PatchRequest(lambda u, m, b: (_ for _ in ()).throw(TrackerError("HTTP 404: no"))):
             self.assertIsNone(TrackerStore().ensure_ticket("jira", "NOPE-1"))
 
-    def test_due_tracker_ids_respects_each_interval(self) -> None:
+    def test_syncing_window_outlives_the_fetch(self) -> None:
+        """is_syncing is what the board's Sync button and POST /trackers/sync read to
+        refuse a second pass. It used to cover the fetch alone, which left the server's
+        own import passes unguarded - the window in which two passes both decided a
+        ticket was unlinked and imported it twice."""
         store = TrackerStore()
-        # Never synced: everything is due.
-        self.assertEqual(set(store.due_tracker_ids()), {"jira", "ado"})
-        with _PatchRequest(self._handler):
-            store.sync()
-        self.assertEqual(store.due_tracker_ids(), [])
-        # Far enough in the future and they are due again.
-        later = 10**10
-        self.assertEqual(set(store.due_tracker_ids(now=later)), {"jira", "ado"})
+        self.assertFalse(store.is_syncing)
+        with store.syncing():
+            self.assertTrue(store.is_syncing)
+            # The fetch marks its own (nested) window; leaving it must not clear ours.
+            with _PatchRequest(self._handler):
+                store.sync()
+            self.assertTrue(store.is_syncing)
+        self.assertFalse(store.is_syncing)
 
-    def test_a_failing_tracker_is_still_retried(self) -> None:
-        """Due-ness keys off the last ATTEMPT, so a broken tracker keeps trying rather than
-        wedging itself permanently."""
+    def test_syncing_window_clears_when_the_pass_raises(self) -> None:
         store = TrackerStore()
-        with _PatchRequest(lambda u, m, b: (_ for _ in ()).throw(TrackerError("boom"))):
-            store.sync()
-        self.assertEqual(store.due_tracker_ids(now=10**10), ["jira", "ado"])
+        with self.assertRaises(RuntimeError):
+            with store.syncing():
+                raise RuntimeError("pass blew up")
+        self.assertFalse(store.is_syncing)
 
     def test_an_unusable_tracker_reports_why_instead_of_being_skipped(self) -> None:
         """Silently ignoring a misconfigured tracker looks exactly like one with no

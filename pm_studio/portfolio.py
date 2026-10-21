@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from .config import CONFIG
+from .workspace_lock import warn_if_held
 
 # Same import, same reason as roadmap.py: what makes two spellings of a ticket key the
 # SAME ticket is trackers.py's one rule, and the project⇄epic 1:1 below is only as good
@@ -239,6 +240,10 @@ class PortfolioStore:
         self._initiatives: dict[str, Initiative] = {}
         self._projects: dict[str, Project] = {}
         self._subscribers: list[Callable[[dict], None]] = []
+        # Same warning as RoadmapStore's, for the same reason: whole-file writes assume
+        # this process owns the workspace (see workspace_lock).
+        if path is None:
+            warn_if_held()
         self._load()
 
     # ---- persistence ----
