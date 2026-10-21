@@ -204,6 +204,10 @@ GITIGNORE_ENTRIES: tuple[str, ...] = (
     "{workspace_rel}/audit.jsonl",
     "{workspace_rel}/activity.jsonl",
     "{workspace_rel}/trackers.json",
+    # Which process owns this workspace right now (workspace_lock.py). A pid is true
+    # of one machine for one run; committing it would hand every checkout a lock
+    # naming a process that was never theirs.
+    "{workspace_rel}/server.lock",
     "{workspace_rel}/people.json",
     # The local-env supervisor's record of provisioned resources (local_env.py).
     "{workspace_rel}/local-env/",
