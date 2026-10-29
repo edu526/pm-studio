@@ -351,6 +351,11 @@
   .judge-verdict.violation { color: var(--status-error); }
   .judge-verdict.inconclusive { color: var(--status-running); }
   .task-card .judge-body { margin-top: 6px; white-space: pre-wrap; }
+  /* Pull requests PM Studio opened for the task's branches once the judge passed it:
+     one line each, linking to the PR, or saying why it could not be opened. */
+  .task-card .pr-list { margin: 8px 0 0; padding: 0; list-style: none; font-size: 0.9em; }
+  .task-card .pr-list li { margin-top: 2px; overflow-wrap: anywhere; }
+  .task-card .pr-list .failed { color: var(--status-error); }
   /* Files the dev task left for the stakeholder: images as thumbnails (click for full
      size), anything else as a plain link. */
   .task-card .artifacts { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
@@ -940,6 +945,7 @@
       </details>
       ${task.result ? `<details><summary>Result</summary><div class="result-body"></div></details>` : ""}
       ${task.judge ? `<details class="judge-line"><summary><span class="judge-verdict ${task.judge.verdict}"></span></summary><div class="judge-body"></div></details>` : ""}
+      ${(task.pull_requests ?? []).length ? `<ul class="pr-list"></ul>` : ""}
     `;
     const desc = (task.description ?? "").trim();
     // Collapsed preview: first line, truncated to a short one-line snippet.
@@ -965,6 +971,27 @@
       );
       if (judge.summary) lines.push(judge.summary);
       card.querySelector(".judge-body").textContent = lines.join("\n") || "No detail recorded.";
+    }
+    for (const pr of task.pull_requests ?? []) {
+      // Built with textContent / setAttribute only: branch names and errors come from
+      // git and the hosts' APIs, not from us.
+      const item = document.createElement("li");
+      const where = `${pr.branch} → ${pr.target}`;
+      if (pr.status === "failed") {
+        item.className = "failed";
+        item.textContent = `Pull request not opened (${where}): ${pr.error || "no reason recorded"}`;
+      } else {
+        item.append(pr.status === "opened" ? "Pull request opened: " : "Pull request updated: ");
+        const link = document.createElement("a");
+        link.setAttribute("href", /^https:\/\//.test(pr.url || "") ? pr.url : "#");
+        link.setAttribute("target", "_blank");
+        link.setAttribute("rel", "noopener");
+        link.textContent = where;
+        item.append(link);
+        const reviewers = (pr.reviewers ?? []).filter(Boolean);
+        if (reviewers.length) item.append(` · reviewers: ${reviewers.join(", ")}`);
+      }
+      card.querySelector(".pr-list").append(item);
     }
     const steps = task.progress || [];
     if (steps.length) {
