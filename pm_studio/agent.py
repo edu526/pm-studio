@@ -731,6 +731,30 @@ def _judge_completion_note(task: dict, at_cap: bool) -> str:
     return ""
 
 
+def _pull_request_completion_note(task: dict) -> str:
+    """The sentence(s) spliced into a task-completion prompt when PM Studio pushed the
+    task's branches and opened pull requests for them (see pull_requests.py) - "" when
+    it did not try. The PM is told the links so it hands them on, and told a failure
+    plainly so it never reports work as "in review" that no reviewer can see."""
+    prs = task.get("pull_requests") or []
+    if not prs:
+        return ""
+    lines = []
+    for pr in prs:
+        where = f'{pr.get("repo")} {pr.get("branch")} -> {pr.get("target")}'
+        if pr.get("status") == "failed":
+            lines.append(f'{where}: FAILED ({pr.get("error") or "no reason recorded"})')
+        else:
+            reviewers = ", ".join(r for r in pr.get("reviewers") or [] if r) or "none assigned"
+            verb = "opened" if pr.get("status") == "opened" else "updated (already open)"
+            lines.append(f'{where}: {verb} {pr.get("url")} (reviewers: {reviewers})')
+    return (
+        " PM Studio pushed the branches and handled the pull requests itself - nobody "
+        "needs to push or open them by hand: " + "; ".join(lines) + ". Give the "
+        "stakeholder the links; for any that FAILED, say so and what it needs."
+    )
+
+
 def _local_instructions_block() -> str:
     """Builds the {local_instructions} slot: the deployment's PM_INSTRUCTIONS.md plus
     a pointer to its knowledge docs, or "" when neither exists."""
@@ -1753,6 +1777,7 @@ class PMAgent:
             "happened."
         )
         prompt += _judge_completion_note(task, at_cap)
+        prompt += _pull_request_completion_note(task)
         prompt += self._artifacts_completion_note(task)
         if self.mode == "research":
             # A task can only be running here if it was dispatched before the session was

@@ -484,6 +484,54 @@ Prompt injection guarantees delivery, not obedience: branch protection and CI in
 repo remain the hard enforcement floor, and the judge is how the studio tells you when
 they're about to be tested.
 
+### Pull requests for reviewers (`[pull_requests]`)
+
+Dev agents commit locally and never push. With `[pull_requests] enabled = true`, the
+studio does the last step itself: when the judge rules **`pass`** on a task, every
+branch the task created or moved in the system's own repositories is pushed to that
+repository's `origin` and opened as a pull request. A `violation` or `inconclusive`
+verdict opens nothing, and work in the deployment repo itself (the registry's
+snapshot commits) is never pushed. Only systems with a `gitflow` are judged, so only
+they get pull requests.
+
+```toml
+[pull_requests]
+enabled = true
+
+[pull_requests.bitbucket]            # Bitbucket Cloud: Atlassian email + API token
+email_env = "BITBUCKET_EMAIL"
+token_env = "BITBUCKET_API_TOKEN"
+
+[pull_requests.ado]                  # Azure DevOps: PAT with Code (read & write)
+token_env = "ADO_PAT"
+
+[systems.rides]
+gitflow    = "docs/rides/GITFLOW.md"
+pr_targets = { "*-rc" = "release-candidate/next-release" }   # first glob wins; else main
+
+[systems.rides.reviewers]            # or a plain array, for every repo of the system
+"*"             = ["609b1998..."]    # repo folder under `path` -> account ids
+"db-migrations" = ["712020:6418..."]
+```
+
+- **Host** comes from the repository's `origin` URL (HTTPS or SSH, Bitbucket Cloud or
+  Azure DevOps). The push carries the token in an Authorization header passed through
+  `GIT_CONFIG_*` environment variables, so it is never on a command line; hooks run.
+- **Reviewers.** A pull request created through Bitbucket's API does not get the
+  repository's default reviewers, so the studio reads `effective-default-reviewers`
+  and sends them, plus the system's `reviewers` for that repository, minus the PR's
+  author (the token's owner), whom Bitbucket refuses. On Azure DevOps, branch-policy
+  reviewers are added by the service; `reviewers` are identity ids added on top.
+  Both hosts take ids, not emails: on Bitbucket a `{uuid}` or an Atlassian account id
+  (the same id Jira shows).
+- **The Bitbucket token** needs `read:user`, `read:repository`, `write:repository`,
+  `read:pullrequest` and `write:pullrequest`.
+- **An open pull request** from the same branch to the same target is not duplicated:
+  the push updates it.
+- **Failures never fail the task.** Each branch gets a record on the task
+  (`pull_requests`: opened / updated / failed, with the link or the scrubbed error),
+  shown on the task card and handed to the PM, who passes the links on.
+
 **The edge is many-to-many, so systems totals never sum across products.** A system
 touched by three products would be counted three times. This is the same overlap rule
 goals already carry — see `docs/ARCHITECTURE.md`.

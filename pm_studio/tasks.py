@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
-from . import gitsnapshot, judge, roadmap, session_checkout
+from . import gitsnapshot, judge, pull_requests, roadmap, session_checkout
 from . import agent_mcp
 from .agent_env import subprocess_env
 from .config import CONFIG, DEV_INSTRUCTIONS_NAME, LOCAL_DIR_NAME
@@ -302,10 +302,12 @@ class TaskRegistry:
         )
 
     def _repo_states(self, rels: list[str]) -> dict[str, dict]:
-        """{rel: {"head": sha, "dirty": bool}} for each nested repo, read under the
-        caller's git_lock. `dirty` (uncommitted or untracked files) is recorded because
-        the deployment repo's snapshot cannot sweep work inside a nested repo into a
-        commit - a task that only dirtied a nested tree would otherwise be invisible."""
+        """{rel: {"head": sha, "dirty": bool, "branches": {name: sha}}} for each nested
+        repo, read under the caller's git_lock. `dirty` (uncommitted or untracked files)
+        is recorded because the deployment repo's snapshot cannot sweep work inside a
+        nested repo into a commit - a task that only dirtied a nested tree would
+        otherwise be invisible. `branches` (local branch tips) is what tells which
+        branches the task created or moved, i.e. what to open pull requests for."""
         states: dict[str, dict] = {}
         for rel in rels:
             repo = self.repo_root / rel
@@ -313,9 +315,18 @@ class TaskRegistry:
                 ["git", "status", "--porcelain"],
                 cwd=str(repo), capture_output=True, text=True,
             )
+            refs = subprocess.run(
+                ["git", "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads"],
+                cwd=str(repo), capture_output=True, text=True,
+            )
+            branches = {}
+            for line in refs.stdout.splitlines() if refs.returncode == 0 else []:
+                sha, _, ref = line.partition(" ")
+                branches[ref.removeprefix("refs/heads/")] = sha
             states[rel] = {
                 "head": self._git_head(repo),
                 "dirty": status.returncode == 0 and bool(status.stdout.strip()),
+                "branches": branches,
             }
         return states
 
@@ -504,10 +515,40 @@ class TaskRegistry:
         )
         if verdict is not None:
             final["judge"] = verdict
+        # Same reasoning as the judge: the PM's completion turn should already be able
+        # to hand the stakeholder the pull-request links.
+        opened = self._open_pull_requests(
+            task_id, system, description, verdict, nested_before, nested_after
+        )
+        if opened:
+            final["pull_requests"] = opened
         self._write_task(final)
         with self._procs_lock:
             self._threads.pop(task_id, None)
             self._stops.pop(task_id, None)
+
+    def _open_pull_requests(
+        self, task_id: str, system: str, description: str, verdict: dict | None,
+        nested_before: dict[str, dict] | None, nested_after: dict[str, dict] | None,
+    ) -> list[dict]:
+        """Pushes and opens a pull request for each branch the task moved in the
+        system's own repositories - only when [pull_requests] is enabled and the judge
+        PASSED the task. A violation or an inconclusive verdict opens nothing: reviewers
+        should only ever be handed work that met the system's rules. Work in the
+        deployment repo itself is never pushed; its commits are the registry's
+        bookkeeping snapshots."""
+        spec = roadmap.SYSTEMS.get(system) if system else None
+        if (
+            spec is None
+            or not CONFIG.pull_requests.enabled
+            or (verdict or {}).get("verdict") != judge.VERDICT_PASS
+            or not nested_after
+        ):
+            return []
+        return pull_requests.open_for_task(
+            self.repo_root, spec, CONFIG.pull_requests, nested_before or {}, nested_after,
+            task_id=task_id, description=description,
+        )
 
     def _judge(
         self, system: str, description: str, head_before: str, head_after: str,

@@ -27,6 +27,7 @@ _load_env_file). It stays outside because it holds the actual secrets and the ho
 git-ignores it, while `pm_studio_local/` is committed.
 """
 
+import fnmatch
 import json
 import os
 import re
@@ -62,6 +63,9 @@ MODE_ENTERPRISE = "enterprise"
 MODES = (MODE_PERSONAL, MODE_ENTERPRISE)
 
 DEFAULT_SMTP_PORT = 587
+
+# The branch a system's pull requests target when none of its `pr_targets` matches.
+DEFAULT_PR_TARGET = "main"
 
 # DEPRECATED, kept only so existing config files keep loading: nothing schedules a
 # tracker pull any more. Syncs are started by hand ("Sync now" on the board, or POST
@@ -570,6 +574,56 @@ class SystemSpec:
     # developer's machine for this system (see LocalEnvSpec and local_env.py). None
     # means the system declares no local environment and the feature ignores it.
     local: LocalEnvSpec | None = None
+    # Which branch a pull request for a work branch targets, as ordered (glob, target)
+    # pairs - the first glob matching the work branch's name wins, and a branch nothing
+    # matches targets DEFAULT_PR_TARGET. Only read when [pull_requests] is enabled (see
+    # pull_requests.py); e.g. `pr_targets = { "*-rc" = "release-candidate/next-release" }`.
+    pr_targets: tuple[tuple[str, str], ...] = ()
+    # Reviewers added to this system's pull requests ON TOP of the host's own defaults
+    # (Bitbucket's default reviewers, Azure DevOps' policy reviewers): Bitbucket
+    # `{uuid}`s or Atlassian account ids, Azure DevOps identity ids - the hosts' APIs
+    # take ids, not emails. As (repo glob, ids) pairs: the glob matches the repository's
+    # path inside the system's `path` ("backend", "db-migrations"; "" when `path` is
+    # itself the repository), and every matching entry adds its ids. A plain array in
+    # the config is the same as one "*" entry.
+    reviewers: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+    def pr_target(self, branch: str) -> str:
+        for pattern, target in self.pr_targets:
+            if fnmatch.fnmatchcase(branch, pattern):
+                return target
+        return DEFAULT_PR_TARGET
+
+    def reviewers_for(self, repo_rel: str) -> tuple[str, ...]:
+        """The extra reviewers for a pull request in the repository at `repo_rel`
+        (deployment-repo-relative), in declaration order, without duplicates."""
+        inner = repo_rel.removeprefix(self.path).strip("/") if self.path else repo_rel
+        ids: list[str] = []
+        for pattern, entry in self.reviewers:
+            if fnmatch.fnmatchcase(inner, pattern):
+                ids += [i for i in entry if i not in ids]
+        return tuple(ids)
+
+
+@dataclass(frozen=True)
+class PullRequestConfig:
+    """The optional [pull_requests] table: when enabled, every branch a dev task commits
+    in a system's own repository is pushed and opened as a pull request once the
+    compliance judge passes the task (see pull_requests.py). Off unless declared, so
+    nothing leaves the machine in a deployment that never asked for it.
+
+    Credentials follow the tracker convention - the NAMES of environment variables,
+    never the values - one pair per host kind, because a deployment's systems can live
+    on Bitbucket and Azure DevOps at once. A host with no credential is reported on
+    the task as a failed pull request rather than pushed with whatever git has cached."""
+
+    enabled: bool = False
+    # Bitbucket Cloud: Atlassian account email + API token (scopes: read/write
+    # repository, read/write pull request, read account).
+    bitbucket_email: str = ""
+    bitbucket_token: str = ""
+    # Azure DevOps: a PAT with Code (read & write).
+    ado_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -708,6 +762,8 @@ class Config:
     # re-reads this part of config.toml when the file changes, so a running server
     # picks up new servers without a restart.
     agent_mcp: tuple["AgentMcpServer", ...] = ()
+    # Optional [pull_requests] table - see PullRequestConfig. Disabled by default.
+    pull_requests: PullRequestConfig = field(default_factory=PullRequestConfig)
 
     def tracker(self, tracker_id: str) -> TrackerConfig | None:
         return next((t for t in self.trackers if t.id == tracker_id), None)
@@ -896,7 +952,8 @@ def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
                 f"{config_path} has [systems] entry {system_id!r} as a "
                 f"{type(value).__name__}; a system is either a label string "
                 '(claims = "Claims Processor") or a table with `label` and optional '
-                "`path`, `repo`, `guidance`, `gitflow`, `pipelines` and `local`"
+                "`path`, `repo`, `guidance`, `gitflow`, `pipelines`, `pr_targets`, "
+                "`reviewers` and `local`"
             )
         # Systems do not nest. `parent` is meaningful in the sibling [products] table, so
         # an operator could reasonably expect it here - refuse loudly rather than accept
@@ -915,6 +972,26 @@ def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
                 f"{type(pipelines).__name__}; it must be an array, e.g. "
                 'pipelines = ["rides-ci"]'
             )
+        pr_targets = value.get("pr_targets", {})
+        if not isinstance(pr_targets, dict) or not all(
+            isinstance(t, str) and t.strip() for t in pr_targets.values()
+        ):
+            _fatal(
+                f"{config_path} has system {system_id!r} with an invalid `pr_targets`; it "
+                "must be a table of branch glob -> target branch, e.g. "
+                'pr_targets = { "*-rc" = "release-candidate/next-release" }'
+            )
+        reviewers = value.get("reviewers", {})
+        if isinstance(reviewers, list):
+            reviewers = {"*": reviewers}
+        if not isinstance(reviewers, dict) or not all(
+            isinstance(ids, list) for ids in reviewers.values()
+        ):
+            _fatal(
+                f"{config_path} has system {system_id!r} with an invalid `reviewers`; it "
+                'must be an array of account ids (reviewers = ["{1b2c...}"]) or a table '
+                'of repo glob -> array (reviewers = { "*" = [...], "db-migrations" = [...] })'
+            )
         # A missing label is cosmetic, not structural - same call as [products] makes.
         systems[system_id] = SystemSpec(
             label=str(value.get("label", "")).strip() or system_id,
@@ -926,6 +1003,11 @@ def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
             local=_parse_local_env(value["local"], system_id, config_path)
             if "local" in value
             else None,
+            pr_targets=tuple((str(k), v.strip()) for k, v in pr_targets.items()),
+            reviewers=tuple(
+                (str(glob), tuple(str(r).strip() for r in ids if str(r).strip()))
+                for glob, ids in reviewers.items()
+            ),
         )
     return systems
 
@@ -1954,6 +2036,39 @@ def _parse_smtp(raw: dict) -> SmtpConfig | None:
     )
 
 
+def _parse_pull_requests(raw: dict, config_path: Path) -> PullRequestConfig:
+    """Reads the optional [pull_requests] table. Credentials only by `*_env` name: the
+    table lives in the committed config, and a push token there would be a push token
+    in git history - so unlike [smtp] there is no inline fallback to warn about."""
+    table = raw.get("pull_requests")
+    if table is None:
+        return PullRequestConfig()
+    if not isinstance(table, dict):
+        _fatal(f"{config_path} has [pull_requests] as a {type(table).__name__}; it must be a table")
+
+    def env(section: str, key: str) -> str:
+        sub = table.get(section) or {}
+        name = str(sub.get(key, "")).strip() if isinstance(sub, dict) else ""
+        if not name:
+            return ""
+        value = os.environ.get(name, "").strip()
+        if not value and table.get("enabled"):
+            print(
+                f"[pm_studio] WARNING: [pull_requests.{section}] {key} = {name!r} in "
+                f"{config_path}, but that environment variable is empty or unset - pull "
+                f"requests on that host will fail until it is set.",
+                file=sys.stderr,
+            )
+        return value
+
+    return PullRequestConfig(
+        enabled=bool(table.get("enabled", False)),
+        bitbucket_email=env("bitbucket", "email_env"),
+        bitbucket_token=env("bitbucket", "token_env"),
+        ado_token=env("ado", "token_env"),
+    )
+
+
 TRACKER_PROVIDERS = ("jira", "ado")
 
 
@@ -2379,6 +2494,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         local_env=_parse_local_env_settings(raw, config_path),
         agent_mcp=_parse_agents(raw, config_path),
         trackers=_parse_trackers(raw, config_path, products, product_systems, systems),
+        pull_requests=_parse_pull_requests(raw, config_path),
     )
 
 
