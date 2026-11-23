@@ -50,6 +50,8 @@ class ParseRemoteTest(unittest.TestCase):
             "https://someone@bitbucket.org/acme/rides.git",
             "git@bitbucket.org:acme/rides.git",
             "ssh://git@bitbucket.org/acme/rides.git",
+            "git@ssh.bitbucket.org:acme/rides.git",
+            "ssh://git@ssh.bitbucket.org/acme/rides.git",
             # A browser URL pasted as the remote still names the repository.
             "https://bitbucket.org/acme/rides/src/main/",
         ):

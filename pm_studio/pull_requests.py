@@ -83,7 +83,9 @@ def parse_remote(url: str) -> Remote | None:
     parts = [urllib.parse.unquote(p) for p in path.strip("/").split("/") if p]
     if parts:
         parts[-1] = parts[-1].removesuffix(".git")
-    if host == "bitbucket.org" and len(parts) >= 2:
+    # Bitbucket serves SSH only on ssh.bitbucket.org since 2026-11-12; a remote on
+    # the former SSH host bitbucket.org still names the repository.
+    if host in ("bitbucket.org", "ssh.bitbucket.org") and len(parts) >= 2:
         # Only the first two segments count: a browser URL such as
         # https://bitbucket.org/ws/repo/src/main/ still names the repository.
         return Remote("bitbucket", parts[0], parts[1].removesuffix(".git"))
